@@ -12,7 +12,7 @@ def main():
     
     # Get the directory of this script
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    app_path = os.path.join(script_dir, 'streamlit_app', 'app.py')
+    app_path = os.path.join(script_dir, 'Home.py')
     
     # Check if the app file exists
     if not os.path.exists(app_path):

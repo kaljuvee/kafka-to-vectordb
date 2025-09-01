@@ -46,7 +46,11 @@ def run_pipeline(max_messages: int, timeout_seconds: int):
             st.error("❌ Failed to initialize pipeline")
             return
         
-        status_text.text("Processing messages from Kafka...")
+        # Show connection type
+        queue_type = "SQLite" if pipeline.use_sqlite else "Kafka"
+        st.info(f"📡 Using {queue_type} message queue")
+        
+        status_text.text(f"Processing messages from {queue_type}...")
         progress_bar.progress(0.3)
         
         # Run pipeline
@@ -59,7 +63,14 @@ def run_pipeline(max_messages: int, timeout_seconds: int):
             st.session_state.demo_stats['chunks_created'] += stats.get('processed_chunks', 0)
             st.session_state.demo_stats['last_activity'] = datetime.now().strftime("%H:%M:%S")
             
-            st.success(f"✅ Pipeline completed successfully!")
+            if stats.get('processed_messages', 0) > 0:
+                st.success(f"✅ Pipeline completed successfully!")
+                
+                # Get vector store stats
+                vs_stats = pipeline.get_vectorstore_stats()
+                st.info(f"📊 Vector store now contains {vs_stats['document_count']} document chunks")
+            else:
+                st.warning(f"⚠️ No messages found in {queue_type} queue")
             
             # Display statistics
             col1, col2, col3 = st.columns(3)
@@ -70,7 +81,9 @@ def run_pipeline(max_messages: int, timeout_seconds: int):
             with col3:
                 st.metric("Processing Rate", f"{stats.get('messages_per_second', 0):.1f} msg/sec")
         else:
-            st.error("❌ Pipeline failed to complete")
+            st.error(f"❌ Pipeline failed: {stats.get('error', 'Unknown error')}")
+        
+        pipeline.close()
     
     except Exception as e:
         st.error(f"❌ Pipeline error: {e}")

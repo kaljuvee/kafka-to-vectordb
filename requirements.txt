@@ -1,5 +1,6 @@
 kafka-python
 langchain
+langchain-openai
 chromadb
 openai
 tiktoken

@@ -32,7 +32,7 @@ if 'generated_documents' not in st.session_state:
     st.session_state.generated_documents = []
 
 def send_documents_to_kafka(delay: float):
-    """Send documents to Kafka"""
+    """Send documents to Kafka or SQLite queue"""
     if not st.session_state.generated_documents:
         st.error("No documents to send")
         return
@@ -42,10 +42,16 @@ def send_documents_to_kafka(delay: float):
     
     try:
         # Initialize producer
+        status_text.text("Initializing producer...")
         producer = DocumentProducer()
+        
         if not producer.connect():
-            st.error("❌ Failed to connect to Kafka broker")
+            st.error("❌ Failed to connect to message queue")
             return
+        
+        # Show connection type
+        queue_type = "SQLite" if producer.use_sqlite else "Kafka"
+        st.info(f"📡 Connected to {queue_type} message queue")
         
         documents = st.session_state.generated_documents
         total_docs = len(documents)
@@ -67,7 +73,7 @@ def send_documents_to_kafka(delay: float):
         st.session_state.demo_stats['last_activity'] = datetime.now().strftime("%H:%M:%S")
         
         if sent_count == total_docs:
-            st.success(f"✅ Successfully sent {sent_count} documents to Kafka!")
+            st.success(f"✅ Successfully sent {sent_count} documents to {queue_type}!")
         else:
             st.warning(f"⚠️ Sent {sent_count}/{total_docs} documents (some failed)")
     

@@ -5,7 +5,10 @@ import sys
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import OpenAIEmbeddings
+try:
+    from langchain_openai import OpenAIEmbeddings
+except ImportError:
+    from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain.schema import Document
 from typing import Dict, Any, List
@@ -18,8 +21,11 @@ from config.config import (
     CHROMA_DB_PATH, CHROMA_COLLECTION_NAME, CHUNK_SIZE, CHUNK_OVERLAP
 )
 
+# Import SQLite fallback
+from sqlite_message_queue import SQLiteConsumer, SQLiteMessageQueue
+
 class KafkaToVectorDBPipeline:
-    """Kafka to VectorDB ingestion pipeline"""
+    """Kafka to VectorDB ingestion pipeline with SQLite fallback"""
     
     def __init__(self, 
                  kafka_broker: str = KAFKA_BROKER,
@@ -39,6 +45,9 @@ class KafkaToVectorDBPipeline:
         self.vectorstore = None
         self.embeddings = None
         self.text_splitter = None
+        self.use_sqlite = False
+        self.sqlite_consumer = None
+        self.sqlite_queue = None
         
         # Statistics
         self.processed_messages = 0
@@ -56,21 +65,15 @@ class KafkaToVectorDBPipeline:
                 print("❌ OPENAI_API_KEY not found in environment variables")
                 return False
             
-            # Initialize Kafka consumer
-            print(f"📡 Connecting to Kafka broker: {self.kafka_broker}")
-            self.consumer = KafkaConsumer(
-                self.topic,
-                bootstrap_servers=[self.kafka_broker],
-                group_id=self.group_id,
-                enable_auto_commit=False,  # Manual offset commit for at-least-once delivery
-                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                consumer_timeout_ms=10000,  # 10 second timeout for demo purposes
-                auto_offset_reset='earliest'  # Start from beginning if no offset
-            )
+            # Try to initialize Kafka consumer first
+            if not self._initialize_consumer():
+                return False
             
             # Initialize embeddings
             print("🧠 Initializing OpenAI embeddings...")
-            self.embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+            import os
+            os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+            self.embeddings = OpenAIEmbeddings()
             
             # Initialize vector store
             print(f"🗄️  Initializing ChromaDB at: {self.chroma_path}")
@@ -82,263 +85,299 @@ class KafkaToVectorDBPipeline:
             )
             
             # Initialize text splitter
-            print(f"✂️  Initializing text splitter (chunk_size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP})")
+            print(f"📝 Initializing text splitter (chunk_size: {CHUNK_SIZE}, overlap: {CHUNK_OVERLAP})")
             self.text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=CHUNK_SIZE,
                 chunk_overlap=CHUNK_OVERLAP,
-                separators=["\\n\\n", "\\n", ". ", " ", ""]
+                length_function=len,
+                separators=["\n\n", "\n", " ", ""]
             )
             
-            print("✅ Pipeline initialization complete!")
+            print("✅ Pipeline initialization completed successfully")
             return True
             
         except Exception as e:
-            print(f"❌ Failed to initialize pipeline: {e}")
+            print(f"❌ Pipeline initialization failed: {e}")
             return False
     
-    def process_message(self, message) -> bool:
-        """Process a single Kafka message"""
+    def _initialize_consumer(self) -> bool:
+        """Initialize Kafka consumer or fallback to SQLite"""
         try:
-            payload = message.value
+            print(f"📡 Attempting to connect to Kafka broker: {self.kafka_broker}")
+            self.consumer = KafkaConsumer(
+                self.topic,
+                bootstrap_servers=[self.kafka_broker],
+                group_id=self.group_id,
+                enable_auto_commit=False,  # Manual offset commit for at-least-once delivery
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                consumer_timeout_ms=5000,  # 5 second timeout for faster fallback
+                auto_offset_reset='earliest',  # Start from beginning if no offset
+                request_timeout_ms=5000,
+                session_timeout_ms=6000,
+                heartbeat_interval_ms=2000
+            )
             
-            # Extract text and metadata
-            text = payload.get("text", "")
-            meta = payload.get("meta", {})
+            # Test the connection by trying to get metadata
+            partitions = self.consumer.partitions_for_topic(self.topic)
+            if partitions is None:
+                raise Exception("Topic not found or broker unreachable")
             
-            if not text.strip():
-                print(f"⚠️  Skipping empty message at offset {message.offset}")
+            print("✅ Connected to Kafka broker successfully")
+            self.use_sqlite = False
+            return True
+            
+        except Exception as e:
+            print(f"⚠️  Kafka connection failed: {e}")
+            print("🔄 Falling back to SQLite message queue...")
+            
+            try:
+                self.sqlite_consumer = SQLiteConsumer([self.topic], group_id=self.group_id)
+                self.sqlite_queue = SQLiteMessageQueue()
+                self.use_sqlite = True
+                print("✅ SQLite message queue initialized successfully")
                 return True
+            except Exception as sqlite_error:
+                print(f"❌ SQLite fallback failed: {sqlite_error}")
+                return False
+    
+    def process_message(self, message_data: Dict[str, Any]) -> bool:
+        """Process a single message and add to vector store"""
+        try:
+            # Extract text and metadata
+            text = message_data.get("text", "")
+            metadata = message_data.get("metadata", {})
             
-            # Add Kafka metadata
-            meta.update({
-                "kafka_topic": message.topic,
-                "kafka_partition": message.partition,
-                "kafka_offset": message.offset,
-                "kafka_timestamp": message.timestamp,
-                "processed_at": time.time()
-            })
+            if not text:
+                print("⚠️  Empty text content, skipping message")
+                return False
             
             # Split text into chunks
-            docs = self.text_splitter.split_documents([
-                Document(page_content=text, metadata=meta)
-            ])
+            chunks = self.text_splitter.split_text(text)
             
-            if not docs:
-                print(f"⚠️  No chunks created from message at offset {message.offset}")
-                return True
+            if not chunks:
+                print("⚠️  No chunks created from text, skipping message")
+                return False
             
-            # Generate stable IDs for idempotency
-            ids = []
-            for i, doc in enumerate(docs):
-                # Create deterministic ID based on content and metadata
-                content_hash = str(uuid.uuid5(
-                    uuid.NAMESPACE_DNS, 
-                    f"{doc.page_content}_{meta.get('id', '')}_{i}"
+            # Create documents with metadata
+            documents = []
+            for i, chunk in enumerate(chunks):
+                # Create unique ID for each chunk
+                chunk_id = f"{metadata.get('id', 'unknown')}_{i}"
+                
+                # Prepare chunk metadata
+                chunk_metadata = {
+                    **metadata,
+                    "chunk_id": chunk_id,
+                    "chunk_index": i,
+                    "total_chunks": len(chunks),
+                    "chunk_size": len(chunk)
+                }
+                
+                documents.append(Document(
+                    page_content=chunk,
+                    metadata=chunk_metadata
                 ))
-                ids.append(content_hash)
             
-            # Upsert to vector store
-            self.vectorstore.add_documents(documents=docs, ids=ids)
-            self.vectorstore.persist()
+            # Add documents to vector store
+            self.vectorstore.add_documents(documents)
             
-            # Update statistics
-            self.processed_chunks += len(docs)
-            
-            print(f"✅ Processed message offset {message.offset}: "
-                  f"{len(docs)} chunks from '{meta.get('title', 'Unknown')}' "
-                  f"({meta.get('document_type', 'unknown')})")
+            self.processed_chunks += len(documents)
+            print(f"✅ Processed document: {metadata.get('title', 'Unknown')[:50]}... "
+                  f"({len(documents)} chunks)")
             
             return True
             
         except Exception as e:
-            print(f"❌ Error processing message at offset {message.offset}: {e}")
+            print(f"❌ Error processing message: {e}")
             self.errors += 1
             return False
     
-    def run(self, max_messages: int = None, timeout_seconds: int = None) -> Dict[str, Any]:
-        """Run the ingestion pipeline"""
-        if not self.consumer or not self.vectorstore:
-            print("❌ Pipeline not initialized. Call initialize() first.")
-            return {"error": "Pipeline not initialized"}
-        
-        print(f"🚀 Starting Kafka to VectorDB ingestion...")
-        print(f"📊 Topic: {self.topic}, Group: {self.group_id}")
-        print(f"🎯 Max messages: {max_messages or 'unlimited'}")
-        print(f"⏰ Timeout: {timeout_seconds or 'none'} seconds")
-        print("Press Ctrl+C to stop gracefully\\n")
+    def run(self, max_messages: int = 50, timeout_seconds: int = 60) -> Dict[str, Any]:
+        """Run the pipeline to process messages"""
+        print(f"🚀 Starting pipeline (max_messages: {max_messages}, timeout: {timeout_seconds}s)")
+        print(f"📊 Using {('SQLite' if self.use_sqlite else 'Kafka')} message queue")
         
         self.start_time = time.time()
+        self.processed_messages = 0
+        self.processed_chunks = 0
+        self.errors = 0
         
         try:
-            message_count = 0
-            
-            for message in self.consumer:
-                # Process the message
-                if self.process_message(message):
-                    # Commit offset only after successful processing
-                    self.consumer.commit()
-                    self.processed_messages += 1
-                    message_count += 1
-                    
-                    # Check if we've reached the maximum number of messages
-                    if max_messages and message_count >= max_messages:
-                        print(f"🎯 Reached maximum message limit: {max_messages}")
-                        break
-                    
-                    # Progress update every 10 messages
-                    if message_count % 10 == 0:
-                        elapsed = time.time() - self.start_time
-                        rate = message_count / elapsed if elapsed > 0 else 0
-                        print(f"📊 Progress: {message_count} messages, "
-                              f"{self.processed_chunks} chunks, "
-                              f"{rate:.1f} msg/sec")
+            if self.use_sqlite:
+                return self._run_sqlite_consumer(max_messages, timeout_seconds)
+            else:
+                return self._run_kafka_consumer(max_messages, timeout_seconds)
                 
-                # Check timeout
-                if timeout_seconds:
-                    elapsed = time.time() - self.start_time
-                    if elapsed >= timeout_seconds:
-                        print(f"⏰ Timeout reached: {timeout_seconds} seconds")
-                        break
-        
-        except KeyboardInterrupt:
-            print("\\n🛑 Graceful shutdown requested...")
-        
         except Exception as e:
-            print(f"\\n❌ Pipeline error: {e}")
-            self.errors += 1
-        
-        finally:
-            # Final statistics
-            elapsed = time.time() - self.start_time
-            stats = self.get_statistics(elapsed)
-            self.print_statistics(stats)
-            
-            # Close consumer
-            if self.consumer:
-                self.consumer.close()
-                print("✅ Kafka consumer closed")
-            
-            return stats
+            print(f"❌ Pipeline execution failed: {e}")
+            return {
+                "error": str(e),
+                "processed_messages": self.processed_messages,
+                "processed_chunks": self.processed_chunks,
+                "errors": self.errors
+            }
     
-    def get_statistics(self, elapsed_time: float = None) -> Dict[str, Any]:
-        """Get pipeline statistics"""
-        if elapsed_time is None and self.start_time:
-            elapsed_time = time.time() - self.start_time
+    def _run_sqlite_consumer(self, max_messages: int, timeout_seconds: int) -> Dict[str, Any]:
+        """Run pipeline with SQLite consumer"""
+        end_time = time.time() + timeout_seconds
         
-        return {
+        while self.processed_messages < max_messages and time.time() < end_time:
+            # Get messages from SQLite queue
+            messages_dict = self.sqlite_consumer.poll(max_records=min(5, max_messages - self.processed_messages))
+            
+            if not messages_dict or not messages_dict.get(self.topic):
+                time.sleep(0.5)  # Wait a bit before next poll
+                continue
+            
+            for message in messages_dict[self.topic]:
+                if self.process_message(message.value):
+                    self.processed_messages += 1
+                
+                if self.processed_messages >= max_messages:
+                    break
+            
+            # Commit offsets (handled automatically in SQLite consumer)
+            self.sqlite_consumer.commit()
+        
+        return self._get_run_stats()
+    
+    def _run_kafka_consumer(self, max_messages: int, timeout_seconds: int) -> Dict[str, Any]:
+        """Run pipeline with Kafka consumer"""
+        end_time = time.time() + timeout_seconds
+        
+        for message in self.consumer:
+            if time.time() > end_time or self.processed_messages >= max_messages:
+                break
+            
+            if self.process_message(message.value):
+                self.processed_messages += 1
+            
+            # Commit offset for at-least-once delivery
+            self.consumer.commit()
+        
+        return self._get_run_stats()
+    
+    def _get_run_stats(self) -> Dict[str, Any]:
+        """Get pipeline execution statistics"""
+        duration = time.time() - self.start_time
+        
+        stats = {
             "processed_messages": self.processed_messages,
             "processed_chunks": self.processed_chunks,
             "errors": self.errors,
-            "elapsed_time": elapsed_time or 0,
-            "messages_per_second": self.processed_messages / elapsed_time if elapsed_time > 0 else 0,
-            "chunks_per_second": self.processed_chunks / elapsed_time if elapsed_time > 0 else 0,
-            "collection_name": self.collection_name,
-            "chroma_path": self.chroma_path
+            "duration": duration,
+            "messages_per_second": self.processed_messages / duration if duration > 0 else 0,
+            "chunks_per_second": self.processed_chunks / duration if duration > 0 else 0,
+            "queue_type": "SQLite" if self.use_sqlite else "Kafka"
         }
-    
-    def print_statistics(self, stats: Dict[str, Any]):
-        """Print pipeline statistics"""
-        print("\\n" + "="*50)
-        print("📊 PIPELINE STATISTICS")
-        print("="*50)
-        print(f"Messages processed: {stats['processed_messages']}")
-        print(f"Chunks created: {stats['processed_chunks']}")
-        print(f"Errors: {stats['errors']}")
-        print(f"Elapsed time: {stats['elapsed_time']:.1f} seconds")
-        print(f"Processing rate: {stats['messages_per_second']:.1f} messages/sec")
-        print(f"Chunk rate: {stats['chunks_per_second']:.1f} chunks/sec")
-        print(f"Collection: {stats['collection_name']}")
-        print(f"Database path: {stats['chroma_path']}")
-        print("="*50)
+        
+        print(f"\n📊 Pipeline Statistics:")
+        print(f"  Queue Type: {stats['queue_type']}")
+        print(f"  Messages processed: {stats['processed_messages']}")
+        print(f"  Chunks created: {stats['processed_chunks']}")
+        print(f"  Errors: {stats['errors']}")
+        print(f"  Duration: {stats['duration']:.2f} seconds")
+        print(f"  Rate: {stats['messages_per_second']:.2f} messages/sec")
+        
+        return stats
     
     def query_vectorstore(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
         """Query the vector store for similar documents"""
-        if not self.vectorstore:
-            print("❌ Vector store not initialized")
-            return []
-        
         try:
-            print(f"🔍 Searching for: '{query}'")
-            docs = self.vectorstore.similarity_search(query, k=k)
+            if not self.vectorstore:
+                print("❌ Vector store not initialized")
+                return []
             
-            results = []
-            for i, doc in enumerate(docs, 1):
-                result = {
-                    "rank": i,
-                    "content": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+            # Perform similarity search
+            results = self.vectorstore.similarity_search(query, k=k)
+            
+            # Format results
+            formatted_results = []
+            for doc in results:
+                formatted_results.append({
+                    "content": doc.page_content,
                     "metadata": doc.metadata
-                }
-                results.append(result)
-                
-                print(f"\\n{i}. {doc.metadata.get('title', 'Unknown Title')}")
-                print(f"   Type: {doc.metadata.get('document_type', 'unknown')}")
-                print(f"   Department: {doc.metadata.get('department', 'unknown')}")
-                print(f"   Content: {result['content']}")
-                print(f"   ---")
+                })
             
-            return results
+            return formatted_results
             
         except Exception as e:
             print(f"❌ Error querying vector store: {e}")
             return []
+    
+    def get_vectorstore_stats(self) -> Dict[str, Any]:
+        """Get vector store statistics"""
+        try:
+            if not self.vectorstore:
+                return {"document_count": 0, "collection_name": self.collection_name}
+            
+            # Get collection info
+            collection = self.vectorstore._collection
+            count = collection.count()
+            
+            return {
+                "document_count": count,
+                "collection_name": self.collection_name,
+                "database_path": self.chroma_path
+            }
+            
+        except Exception as e:
+            print(f"❌ Error getting vector store stats: {e}")
+            return {"document_count": 0, "collection_name": self.collection_name}
+    
+    def close(self):
+        """Close all connections"""
+        try:
+            if self.use_sqlite and self.sqlite_consumer:
+                self.sqlite_consumer.close()
+                print("🔒 SQLite consumer closed")
+            elif self.consumer:
+                self.consumer.close()
+                print("🔒 Kafka consumer closed")
+        except Exception as e:
+            print(f"⚠️  Error closing consumer: {e}")
 
-def main():
-    """Command line interface for the pipeline"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Kafka to VectorDB ingestion pipeline")
-    parser.add_argument("--broker", default=KAFKA_BROKER,
-                       help="Kafka broker address")
-    parser.add_argument("--topic", default=KAFKA_TOPIC,
-                       help="Kafka topic to consume from")
-    parser.add_argument("--group-id", default=KAFKA_GROUP_ID,
-                       help="Kafka consumer group ID")
-    parser.add_argument("--max-messages", type=int,
-                       help="Maximum number of messages to process")
-    parser.add_argument("--timeout", type=int,
-                       help="Timeout in seconds")
-    parser.add_argument("--query", type=str,
-                       help="Query the vector store instead of consuming")
-    parser.add_argument("--query-limit", type=int, default=5,
-                       help="Number of results for query (default: 5)")
-    
-    args = parser.parse_args()
-    
-    # Create pipeline
-    pipeline = KafkaToVectorDBPipeline(
-        kafka_broker=args.broker,
-        topic=args.topic,
-        group_id=args.group_id
-    )
+
+def demo_pipeline():
+    """Demonstrate the pipeline functionality"""
+    print("🚀 Starting Pipeline Demo")
+    print("=" * 50)
     
     # Initialize pipeline
+    pipeline = KafkaToVectorDBPipeline()
     if not pipeline.initialize():
         print("❌ Failed to initialize pipeline")
-        return 1
+        return
     
-    try:
-        if args.query:
-            # Query mode
-            results = pipeline.query_vectorstore(args.query, args.query_limit)
-            print(f"\\n🔍 Found {len(results)} results for query: '{args.query}'")
-        else:
-            # Ingestion mode
-            stats = pipeline.run(
-                max_messages=args.max_messages,
-                timeout_seconds=args.timeout
-            )
-            
-            if stats.get("error"):
-                return 1
+    # Run pipeline
+    stats = pipeline.run(max_messages=10, timeout_seconds=30)
     
-    except KeyboardInterrupt:
-        print("\\n🛑 Interrupted by user")
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return 1
+    if "error" not in stats:
+        print("\n🎉 Pipeline completed successfully!")
+        
+        # Test querying
+        print("\n🔍 Testing vector store queries...")
+        test_queries = [
+            "employee benefits",
+            "remote work policy",
+            "safety guidelines"
+        ]
+        
+        for query in test_queries:
+            results = pipeline.query_vectorstore(query, k=2)
+            print(f"  Query: '{query}' -> {len(results)} results")
+        
+        # Get vector store stats
+        vs_stats = pipeline.get_vectorstore_stats()
+        print(f"\n📈 Vector Store Statistics:")
+        print(f"  Documents: {vs_stats['document_count']}")
+        print(f"  Collection: {vs_stats['collection_name']}")
     
-    return 0
+    # Close pipeline
+    pipeline.close()
+    print("\n🎉 Pipeline demo completed!")
+
 
 if __name__ == "__main__":
-    exit(main())
+    demo_pipeline()
 

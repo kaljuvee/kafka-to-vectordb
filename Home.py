@@ -12,8 +12,12 @@ import plotly.graph_objects as go
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'config'))
 
-from src.data_generator import HRDataGenerator
-from config.config import OPENAI_API_KEY, KAFKA_TOPIC, CHROMA_COLLECTION_NAME
+try:
+    from src.data_generator import HRDataGenerator
+    from config.config import OPENAI_API_KEY, KAFKA_TOPIC, CHROMA_COLLECTION_NAME
+except ImportError as e:
+    st.error(f"Import error: {e}")
+    st.stop()
 
 # Page configuration
 st.set_page_config(

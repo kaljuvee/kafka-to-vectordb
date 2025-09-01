@@ -11,7 +11,11 @@ import plotly.express as px
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'config'))
 
-from src.data_generator import HRDataGenerator
+try:
+    from src.data_generator import HRDataGenerator
+except ImportError as e:
+    st.error(f"Import error: {e}")
+    st.stop()
 
 st.set_page_config(
     page_title="Data Generation - Kafka to VectorDB Demo",

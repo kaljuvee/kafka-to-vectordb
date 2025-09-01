@@ -169,6 +169,29 @@ def main():
     </div>
     """, unsafe_allow_html=True)
     
+    # Demo Video Section
+    st.markdown('<div class="section-header">🎥 Demo Video</div>', unsafe_allow_html=True)
+    st.markdown("Watch the complete pipeline demonstration:")
+    
+    # Video player
+    try:
+        video_file = open('./demo_video.mp4', 'rb')
+        video_bytes = video_file.read()
+        st.video(video_bytes)
+        video_file.close()
+        
+        st.markdown("""
+        **The video showcases:**
+        - 📝 **Data Generation**: Creating synthetic HR documents  
+        - 📤 **Message Queue**: Sending documents to Kafka/SQLite queue
+        - ⚙️ **Pipeline Processing**: Converting documents to vector embeddings
+        - 🔍 **Semantic Search**: Natural language querying capabilities
+        - 📊 **Analytics Dashboard**: Performance monitoring and metrics
+        """)
+    except FileNotFoundError:
+        st.info("📹 Demo video will be available after first run")
+        st.markdown("[![Demo Video](https://img.shields.io/badge/▶️-Watch%20Demo%20Video-blue?style=for-the-badge)](./demo_video.mp4)")
+    
     # Sidebar
     render_sidebar()
     

@@ -12,6 +12,19 @@ Synthetic Data → Kafka Topic → Stream Processor → Embedding Model → Vect
 
 The demo showcases how to build a complete pipeline that can handle real-time document ingestion, processing, and semantic search - perfect for applications like knowledge bases, document retrieval systems, and recommendation engines.
 
+## 🎥 Demo Video
+
+Watch the complete Kafka to VectorDB pipeline demonstration:
+
+[![Kafka to VectorDB Demo](https://img.shields.io/badge/▶️-Watch%20Demo%20Video-blue?style=for-the-badge)](./demo_video.mp4)
+
+The video showcases:
+- **Data Generation**: Creating synthetic HR documents
+- **Message Queue**: Sending documents to Kafka/SQLite queue  
+- **Pipeline Processing**: Converting documents to vector embeddings
+- **Semantic Search**: Natural language querying capabilities
+- **Analytics Dashboard**: Performance monitoring and metrics
+
 ## 🏗️ Architecture
 
 ### Components

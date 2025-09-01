@@ -128,16 +128,27 @@ python demo_cli.py --interactive
 python demo_cli.py --query-only
 ```
 
-### Streamlit Web Interface
+### Option 2: Streamlit Web Interface
 
-The web interface provides six main tabs:
+Launch the interactive web application:
 
-1. **Data Generation**: Create synthetic HR documents
-2. **Kafka Producer**: Send documents to Kafka topic
-3. **Pipeline**: Process documents into vector database
-4. **Search**: Semantic search with natural language queries
-5. **Analytics**: Monitor pipeline performance and statistics
-6. **About**: Documentation and architecture information
+```bash
+python run_streamlit.py
+# or directly:
+streamlit run Home.py
+```
+
+Then open http://localhost:8501 in your browser.
+
+The web interface provides six main pages:
+
+1. **Home**: Overview and getting started guide
+2. **Data Generation**: Create synthetic HR documents
+3. **Kafka Producer**: Send documents to Kafka topic
+4. **Pipeline**: Process documents into vector database
+5. **Search**: Semantic search with natural language queries
+6. **Analytics**: Monitor pipeline performance and statistics
+7. **About**: Documentation and architecture information
 
 ### Sample Queries
 

@@ -14,6 +14,8 @@ The demo showcases how to build a complete pipeline that can handle real-time do
 
 ## 🎥 Demo Video
 
+![Kafka to VectorDB Demo](./demo_preview.gif)
+
 Watch the complete Kafka to VectorDB pipeline demonstration:
 
 [![Kafka to VectorDB Demo](https://img.shields.io/badge/▶️-Watch%20Demo%20Video-blue?style=for-the-badge)](./demo_video.mp4)

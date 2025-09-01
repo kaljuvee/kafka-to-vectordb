@@ -1,13 +1,38 @@
 import streamlit as st
 
 st.set_page_config(
-    page_title="About - Kafka to VectorDB Demo",
-    page_icon="ℹ️",
+    page_title="User Guide - Kafka to VectorDB Demo",
+    page_icon="📖",
     layout="wide"
 )
 
 def main():
-    st.title("ℹ️ About This Demo")
+    st.title("📖 User Guide")
+    
+    st.markdown("""
+    ## 🎥 Demo Video
+    
+    Watch the complete pipeline demonstration:
+    """)
+    
+    # Video player
+    try:
+        video_file = open('./demo_video.mp4', 'rb')
+        video_bytes = video_file.read()
+        st.video(video_bytes)
+        video_file.close()
+        
+        st.markdown("""
+        **The video showcases:**
+        - 📝 **Data Generation**: Creating synthetic HR documents  
+        - 📤 **Message Queue**: Sending documents to Kafka/SQLite queue
+        - ⚙️ **Pipeline Processing**: Converting documents to vector embeddings
+        - 🔍 **Semantic Search**: Natural language querying capabilities
+        - 📊 **Analytics Dashboard**: Performance monitoring and metrics
+        """)
+    except FileNotFoundError:
+        st.info("📹 Demo video will be available after first run")
+        st.markdown("[![Demo Video](https://img.shields.io/badge/▶️-Watch%20Demo%20Video-blue?style=for-the-badge)](./demo_video.mp4)")
     
     st.markdown("""
     ## 🚀 Kafka to VectorDB Pipeline Demo

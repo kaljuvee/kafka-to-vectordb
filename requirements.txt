@@ -1,22 +1,13 @@
-# Core dependencies
-streamlit>=1.28.0
-pandas>=1.5.0
-numpy>=1.21.0
-plotly>=5.0.0
-
-# Kafka and messaging
-kafka-python>=2.0.0
-
-# Vector database and embeddings
-chromadb>=0.4.0
-openai>=1.0.0
-langchain>=0.0.300
-tiktoken>=0.5.0
-
-# Data generation and utilities
-faker>=20.0.0
-python-dotenv>=1.0.0
-
-# Additional utilities
-requests>=2.25.0
+kafka-python
+langchain
+chromadb
+openai
+tiktoken
+streamlit
+pandas
+numpy
+faker
+python-dotenv
+plotly
+requests
 
